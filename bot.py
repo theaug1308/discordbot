@@ -311,7 +311,14 @@ tree.add_command(admin_group)
 # ---------------------------------------------------------------------------
 @bot.event
 async def on_ready():
-    await tree.sync()
+    # Sync to each guild individually (instant) instead of global (takes ~1 hour)
+    for guild in bot.guilds:
+        try:
+            tree.copy_global_to(guild=guild)
+            await tree.sync(guild=guild)
+            print(f"   Synced commands to: {guild.name}")
+        except Exception as e:
+            print(f"   Failed to sync to {guild.name}: {e}")
     print(f"✅ Bot online: {bot.user} (ID: {bot.user.id})")
     print(f"   Versions : {len(config['versions'])}")
     print(f"   Whitelist: {len(config['whitelist'])} users")
