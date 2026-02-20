@@ -1,8 +1,5 @@
 {
-  "versions": {
-    "Delta 707 (Latest)": "https://github.com/YOUR_USER/YOUR_REPO/releases/download/v707/delta-707.zip",
-    "Delta 706": "https://github.com/YOUR_USER/YOUR_REPO/releases/download/v706/delta-706.zip"
-  },
+  "versions": {},
   "whitelist": [],
   "admin_ids": []
 }
