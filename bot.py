@@ -3,6 +3,8 @@ import json
 import discord
 from discord import app_commands
 from discord.ext import commands
+from datetime import datetime, timezone, timedelta
+from discord.ext import tasks
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -12,10 +14,14 @@ CONFIG_FILE = "config.json"
 
 def load_config() -> dict:
     """Load config from disk. Returns default structure if file is missing."""
-    default = {"versions": {}, "whitelist": [], "admin_ids": []}
+    default = {"versions": {}, "whitelist": {}, "admin_ids": []}
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        # Migrate old list-style whitelist to dict-style
+        if isinstance(data.get("whitelist"), list):
+            data["whitelist"] = {}
+        return data
     except (FileNotFoundError, json.JSONDecodeError):
         save_config(default)
         return default
@@ -25,6 +31,24 @@ def save_config(data: dict) -> None:
     """Persist config to disk."""
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def expiry_from_days(days: int) -> str:
+    """Return ISO 8601 expiry string for N days from now."""
+    return (now_utc() + timedelta(days=days)).isoformat()
+
+
+def is_expired(expiry_iso: str) -> bool:
+    """Return True if the expiry timestamp is in the past."""
+    try:
+        expiry = datetime.fromisoformat(expiry_iso)
+        return now_utc() > expiry
+    except ValueError:
+        return True  # malformed timestamp → treat as expired
 
 
 # ---------------------------------------------------------------------------
@@ -44,8 +68,45 @@ def is_admin(user_id: int) -> bool:
 
 
 def is_whitelisted(user_id: int) -> bool:
-    """Check whether a user is whitelisted (admins are always allowed)."""
-    return user_id in config["whitelist"] or is_admin(user_id)
+    """Check whether a user is whitelisted and their access has not expired."""
+    if is_admin(user_id):
+        return True
+    entry = config["whitelist"].get(str(user_id))
+    if entry is None:
+        return False
+    return not is_expired(entry)
+
+
+def get_expiry_display(user_id: int) -> str:
+    """Return a human-readable expiry string for a whitelisted user."""
+    entry = config["whitelist"].get(str(user_id))
+    if entry is None:
+        return "not whitelisted"
+    try:
+        expiry = datetime.fromisoformat(entry)
+        if now_utc() > expiry:
+            return "expired"
+        remaining = expiry - now_utc()
+        days = remaining.days
+        hours = remaining.seconds // 3600
+        return f"expires in {days}d {hours}h (<t:{int(expiry.timestamp())}:R>)"
+    except ValueError:
+        return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Background task: prune expired whitelist entries every hour
+# ---------------------------------------------------------------------------
+@tasks.loop(hours=1)
+async def prune_expired():
+    expired_keys = [
+        uid for uid, exp in config["whitelist"].items() if is_expired(exp)
+    ]
+    if expired_keys:
+        for uid in expired_keys:
+            del config["whitelist"][uid]
+        save_config(config)
+        print(f"   Pruned {len(expired_keys)} expired whitelist entries.")
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +124,7 @@ class VersionSelect(discord.ui.Select):
         version = self.values[0]
         link = config["versions"][version]
         await interaction.response.send_message(
-            f"⬇️ **{version}**\nDownload here: {link}",
+            f"\u2b07\ufe0f **{version}**\nDownload here: {link}",
             ephemeral=True,
         )
 
@@ -80,9 +141,17 @@ class VersionView(discord.ui.View):
 @tree.command(name="download", description="Download a file version")
 async def download(interaction: discord.Interaction):
     if not is_whitelisted(interaction.user.id):
-        await interaction.response.send_message(
-            "🚫 Access denied. You are not whitelisted.", ephemeral=True
-        )
+        # Check if they were once whitelisted but expired
+        entry = config["whitelist"].get(str(interaction.user.id))
+        if entry is not None and is_expired(entry):
+            await interaction.response.send_message(
+                "⏰ Your download access has expired. Please contact an admin to renew.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "🚫 Access denied. You are not whitelisted.", ephemeral=True
+            )
         return
 
     if not config["versions"]:
@@ -107,24 +176,34 @@ whitelist_group = app_commands.Group(
 
 
 @whitelist_group.command(name="add", description="Add a user to the whitelist")
-@app_commands.describe(user="The user to whitelist")
-async def whitelist_add(interaction: discord.Interaction, user: discord.User):
+@app_commands.describe(
+    user="The user to whitelist",
+    days="Number of days until access expires (default: 30)",
+)
+async def whitelist_add(
+    interaction: discord.Interaction, user: discord.User, days: int = 30
+):
     if not is_admin(interaction.user.id):
         await interaction.response.send_message(
             "🚫 Only admins can manage the whitelist.", ephemeral=True
         )
         return
 
-    if user.id in config["whitelist"]:
+    if days < 1:
         await interaction.response.send_message(
-            f"ℹ️ {user.mention} is already whitelisted.", ephemeral=True
+            "⚠️ Days must be at least 1.", ephemeral=True
         )
         return
 
-    config["whitelist"].append(user.id)
+    expiry = expiry_from_days(days)
+    config["whitelist"][str(user.id)] = expiry
     save_config(config)
+
+    expiry_dt = datetime.fromisoformat(expiry)
     await interaction.response.send_message(
-        f"✅ {user.mention} has been added to the whitelist.", ephemeral=True
+        f"✅ {user.mention} whitelisted for **{days} days**.\n"
+        f"Access expires: <t:{int(expiry_dt.timestamp())}:F>",
+        ephemeral=True,
     )
 
 
@@ -137,13 +216,13 @@ async def whitelist_remove(interaction: discord.Interaction, user: discord.User)
         )
         return
 
-    if user.id not in config["whitelist"]:
+    if str(user.id) not in config["whitelist"]:
         await interaction.response.send_message(
             f"ℹ️ {user.mention} is not in the whitelist.", ephemeral=True
         )
         return
 
-    config["whitelist"].remove(user.id)
+    del config["whitelist"][str(user.id)]
     save_config(config)
     await interaction.response.send_message(
         f"✅ {user.mention} has been removed from the whitelist.", ephemeral=True
@@ -164,9 +243,21 @@ async def whitelist_list(interaction: discord.Interaction):
         )
         return
 
-    mentions = [f"<@{uid}>" for uid in config["whitelist"]]
+    lines = []
+    for uid, exp in config["whitelist"].items():
+        try:
+            expiry_dt = datetime.fromisoformat(exp)
+            status = (
+                "~~expired~~" if now_utc() > expiry_dt
+                else f"<t:{int(expiry_dt.timestamp())}:R>"
+            )
+        except ValueError:
+            status = "unknown"
+        lines.append(f"<@{uid}> — {status}")
+
     await interaction.response.send_message(
-        f"📋 **Whitelisted users:**\n{chr(10).join(mentions)}", ephemeral=True
+        f"📋 **Whitelisted users ({len(lines)}):**\n" + "\n".join(lines),
+        ephemeral=True,
     )
 
 
@@ -251,7 +342,6 @@ admin_group = app_commands.Group(name="admin", description="Manage bot admins")
 @admin_group.command(name="add", description="Add a bot admin")
 @app_commands.describe(user="The user to make admin")
 async def admin_add(interaction: discord.Interaction, user: discord.User):
-    # Only server owner or existing admins can add new admins
     if (
         interaction.guild is None
         or interaction.user.id != interaction.guild.owner_id
@@ -323,6 +413,11 @@ async def on_ready():
     # Step 2: Clear global commands AFTER guild sync to remove old duplicates
     tree.clear_commands(guild=None)
     await tree.sync()
+
+    # Start background pruning task
+    if not prune_expired.is_running():
+        prune_expired.start()
+
     print(f"✅ Bot online: {bot.user} (ID: {bot.user.id})")
     print(f"   Versions : {len(config['versions'])}")
     print(f"   Whitelist: {len(config['whitelist'])} users")
@@ -335,10 +430,8 @@ async def on_ready():
 if __name__ == "__main__":
     token = os.environ.get("TOKEN")
     if not token:
-        # Fallback: try loading from .env file manually
         try:
             from dotenv import load_dotenv
-
             load_dotenv()
             token = os.environ.get("TOKEN")
         except ImportError:
