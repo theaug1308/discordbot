@@ -311,11 +311,7 @@ tree.add_command(admin_group)
 # ---------------------------------------------------------------------------
 @bot.event
 async def on_ready():
-    # Clear global commands (remove duplicates from previous global sync)
-    tree.clear_commands(guild=None)
-    await tree.sync()
-
-    # Sync to each guild individually (instant registration)
+    # Step 1: Sync all commands to each guild first (instant registration)
     for guild in bot.guilds:
         try:
             tree.copy_global_to(guild=guild)
@@ -323,6 +319,10 @@ async def on_ready():
             print(f"   Synced commands to: {guild.name}")
         except Exception as e:
             print(f"   Failed to sync to {guild.name}: {e}")
+
+    # Step 2: Clear global commands AFTER guild sync to remove old duplicates
+    tree.clear_commands(guild=None)
+    await tree.sync()
     print(f"✅ Bot online: {bot.user} (ID: {bot.user.id})")
     print(f"   Versions : {len(config['versions'])}")
     print(f"   Whitelist: {len(config['whitelist'])} users")
