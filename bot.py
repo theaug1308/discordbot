@@ -311,7 +311,11 @@ tree.add_command(admin_group)
 # ---------------------------------------------------------------------------
 @bot.event
 async def on_ready():
-    # Sync to each guild individually (instant) instead of global (takes ~1 hour)
+    # Clear global commands (remove duplicates from previous global sync)
+    tree.clear_commands(guild=None)
+    await tree.sync()
+
+    # Sync to each guild individually (instant registration)
     for guild in bot.guilds:
         try:
             tree.copy_global_to(guild=guild)
