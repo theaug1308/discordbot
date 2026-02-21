@@ -426,6 +426,17 @@ async def on_ready():
     print(f"   Admins   : {len(config['admin_ids'])} users")
 
 
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    """Sync slash commands when the bot is added to a new server."""
+    try:
+        tree.copy_global_to(guild=guild)
+        await tree.sync(guild=guild)
+        print(f"   Joined & synced commands to: {guild.name}")
+    except Exception as e:
+        print(f"   Failed to sync to {guild.name}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
