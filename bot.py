@@ -9,7 +9,9 @@ from discord.ext import tasks
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
-CONFIG_FILE = "config.json"
+CONFIG_FILE = os.path.join(
+    "/app/data" if os.path.isdir("/app/data") else ".", "config.json"
+)
 
 
 def load_config() -> dict:
